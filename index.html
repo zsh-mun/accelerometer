@@ -174,12 +174,19 @@
     · X = 左右，Y = 前后，Z = 上下。<br>
     · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
-    <span style="color:#4dd0e1">版本 v2</span>
+    <span style="color:#4dd0e1">版本 v3</span>
   </div>
 </div>
 
 <script>
 "use strict";
+
+window.onerror = function (msg, src, line) {
+  try {
+    var st = document.getElementById("statusText");
+    if (st) st.textContent = "脚本错误：" + msg + "（第 " + line + " 行）";
+  } catch (e) {}
+};
 
 var $ = function (id) { return document.getElementById(id); };
 
@@ -409,10 +416,10 @@ function calibrate() {
 
 // ---------- 绘图 ----------
 
-var compass = $("compass");
-var chart = $("chart");
-var cctx = compass.getContext("2d");
-var chctx = chart.getContext("2d");
+var compass = null;
+var chart = null;
+var cctx = null;
+var chctx = null;
 
 function fitCanvas(canvas, ctx) {
   var dpr = window.devicePixelRatio || 1;
@@ -566,6 +573,11 @@ function render() {
 function init() {
   $("btnStart").addEventListener("click", toggle);
   $("btnCalib").addEventListener("click", calibrate);
+
+  compass = $("compass");
+  chart = $("chart");
+  cctx = compass.getContext("2d");
+  chctx = chart.getContext("2d");
 
   if (!hasMotion()) {
     setStatus("此设备/浏览器不支持加速度传感器（桌面浏览器通常没有）", "err");
