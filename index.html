@@ -194,6 +194,8 @@ var windowSamples = [];
 var WINDOW_MS = 550;
 var STILL_THRESHOLD = 0.18; // m/s²
 var isStill = false;
+var noDataTimer = null;
+var gotData = false;
 
 // 速度历史（画曲线用）
 var history = [];
@@ -253,17 +255,36 @@ function start() {
     return;
   }
 
-  var req = DeviceMotionEvent.requestPermission;
-  if (typeof req === "function") {
-    // iOS 13+：必须在用户手势里请求
-    req.call(DeviceMotionEvent).then(function (state) {
+  var btn = $("btnStart");
+  btn.disabled = true;
+  btn.textContent = "正在请求权限…";
+
+  if (typeof DeviceMotionEvent.requestPermission === "function") {
+    var settled = false;
+    var guard = setTimeout(function () {
+      if (!settled) {
+        btn.disabled = false;
+        btn.textContent = "开始测量";
+        setStatus("没有弹出权限提示。请检查：设置→Safari→隐私与安全性→运动与方向访问 是否开启", "err");
+      }
+    }, 3000);
+
+    DeviceMotionEvent.requestPermission().then(function (state) {
+      settled = true;
+      clearTimeout(guard);
       if (state === "granted") {
         beginListening();
       } else {
-        setStatus("传感器权限被拒绝，请在设置里允许", "err");
+        btn.disabled = false;
+        btn.textContent = "开始测量";
+        setStatus("权限被拒绝。请到 设置→Safari→运动与方向 开启，并在本网站设置里选“询问”", "err");
       }
-    }).catch(function () {
-      setStatus("权限请求失败", "err");
+    }).catch(function (err) {
+      settled = true;
+      clearTimeout(guard);
+      btn.disabled = false;
+      btn.textContent = "开始测量";
+      setStatus("权限请求出错：" + err.message, "err");
     });
   } else {
     beginListening();
@@ -274,13 +295,22 @@ function beginListening() {
   window.addEventListener("devicemotion", onMotion, true);
   running = true;
   lastT = performance.now();
+  gotData = false;
   setStatus(calibrated ? "测量中" : "测量中 · 请先做静止校准", "on");
   $("btnStart").textContent = "停止测量";
+  $("btnStart").disabled = false;
   $("btnCalib").disabled = false;
+  clearTimeout(noDataTimer);
+  noDataTimer = setTimeout(function () {
+    if (!gotData && running) {
+      setStatus("已开启但没收到传感器数据：可能是系统“运动与方向”被关闭，或浏览器不支持", "err");
+    }
+  }, 3000);
 }
 
 function stop() {
   window.removeEventListener("devicemotion", onMotion, true);
+  clearTimeout(noDataTimer);
   running = false;
   isStill = false;
   $("stillBadge").classList.remove("show");
@@ -295,6 +325,7 @@ function toggle() {
 }
 
 function onMotion(e) {
+  gotData = true;
   var aig = e.accelerationIncludingGravity;
   if (!aig) return;
 
@@ -539,7 +570,8 @@ function init() {
     setStatus("此设备/浏览器不支持加速度传感器（桌面浏览器通常没有）", "err");
     $("btnStart").disabled = true;
   } else {
-    setStatus("已就绪 · 点击「开始测量」", "");
+    var hasReq = typeof DeviceMotionEvent.requestPermission === "function";
+    setStatus("已就绪（权限接口：" + (hasReq ? "有" : "无") + "）· 点击「开始测量」", "");
   }
 
   window.addEventListener("resize", function () {
