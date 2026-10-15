@@ -174,7 +174,7 @@
     · X = 左右，Y = 前后，Z = 上下。<br>
     · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
-    <span style="color:#4dd0e1">版本 v4</span>
+    <span style="color:#4dd0e1">版本 v5</span>
   </div>
 </div>
 
@@ -337,17 +337,22 @@ function onMotion(e) {
   var aig = e.accelerationIncludingGravity;
   if (!aig) return;
 
-  // 统一方案：用“含重力”读数减去标定出的重力向量，兼容 iOS（其 acceleration 常为 null）
-  var ax = aig.x - g.x;
-  var ay = aig.y - g.y;
-  var az = aig.z - g.z;
-  acc.x = ax; acc.y = ay; acc.z = az;
-
   // 时间步长
   var now = performance.now();
   var dt = (now - lastT) / 1000;
   lastT = now;
   if (!(dt > 0.0005 && dt < 0.2)) dt = 0.016; // 异常采样用默认 16ms
+
+  // 自适应重力：低通滤波持续估计当前重力方向，手机缓慢转动也能跟上
+  var k = 1 - Math.exp(-dt / 0.5); // 时间常数 0.5 秒
+  g.x += (aig.x - g.x) * k;
+  g.y += (aig.y - g.y) * k;
+  g.z += (aig.z - g.z) * k;
+
+  var ax = aig.x - g.x;
+  var ay = aig.y - g.y;
+  var az = aig.z - g.z;
+  acc.x = ax; acc.y = ay; acc.z = az;
 
   // 积分：v += a·dt
   vel.x += ax * dt;
@@ -370,6 +375,7 @@ function onMotion(e) {
 
   if ($("autoZero").checked && stillNow) {
     vel.x = 0; vel.y = 0; vel.z = 0;
+    g.x = aig.x; g.y = aig.y; g.z = aig.z; // 静止时读数即纯重力，直接锁定
   }
   isStill = stillNow;
 
