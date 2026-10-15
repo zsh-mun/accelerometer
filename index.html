@@ -174,7 +174,7 @@
     · X = 左右，Y = 前后，Z = 上下。<br>
     · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
-    <span style="color:#4dd0e1">版本 v3</span>
+    <span style="color:#4dd0e1">版本 v4</span>
   </div>
 </div>
 
@@ -206,7 +206,7 @@ var noDataTimer = null;
 var gotData = false;
 
 // 速度历史（画曲线用）
-var history = [];
+var speedHistory = [];
 var HISTORY_MS = 10000;
 
 function setStatus(text, mode) {
@@ -374,8 +374,8 @@ function onMotion(e) {
   isStill = stillNow;
 
   // 历史
-  history.push({ t: now, s: speed() });
-  while (history.length && now - history[0].t > HISTORY_MS) history.shift();
+  speedHistory.push({ t: now, s: speed() });
+  while (speedHistory.length && now - speedHistory[0].t > HISTORY_MS) speedHistory.shift();
 
   updateReadouts();
 }
@@ -542,20 +542,20 @@ function drawChart() {
   chctx.moveTo(pad, h / 2); chctx.lineTo(w - pad, h / 2);
   chctx.stroke();
 
-  if (history.length < 2) return;
+  if (speedHistory.length < 2) return;
 
   var maxS = 0;
-  for (var i = 0; i < history.length; i++) if (history[i].s > maxS) maxS = history[i].s;
+  for (var i = 0; i < speedHistory.length; i++) if (speedHistory[i].s > maxS) maxS = speedHistory[i].s;
   if (maxS < 0.5) maxS = 1;
-  var now = history[history.length - 1].t;
+  var now = speedHistory[speedHistory.length - 1].t;
   var t0 = now - HISTORY_MS;
 
   chctx.strokeStyle = "#4dd0e1";
   chctx.lineWidth = 2;
   chctx.beginPath();
-  for (var j = 0; j < history.length; j++) {
-    var px = pad + (history[j].t - t0) / HISTORY_MS * (w - pad * 2);
-    var py = h - pad - (history[j].s / maxS) * (h - pad * 2);
+  for (var j = 0; j < speedHistory.length; j++) {
+    var px = pad + (speedHistory[j].t - t0) / HISTORY_MS * (w - pad * 2);
+    var py = h - pad - (speedHistory[j].s / maxS) * (h - pad * 2);
     if (j === 0) chctx.moveTo(px, py);
     else chctx.lineTo(px, py);
   }
