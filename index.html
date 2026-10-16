@@ -139,17 +139,17 @@
 
     <div class="dir-grid">
       <div class="dir-cell">
-        <div class="k">水平方向（相对手机顶部）</div>
+        <div class="k">运行方向（相对北）</div>
         <div class="v" id="azimuth">—<small>°</small></div>
       </div>
       <div class="dir-cell">
-        <div class="k">俯仰（向上为正）</div>
+        <div class="k">手机朝向（相对北）</div>
         <div class="v" id="pitch">—<small>°</small></div>
       </div>
     </div>
 
     <canvas class="compass" id="compass"></canvas>
-    <div class="chart-cap">速度大小 · 最近 10 秒</div>
+    <div class="chart-cap">融合速度 · 最近 10 秒</div>
     <canvas class="chart" id="chart"></canvas>
   </div>
 
@@ -158,6 +158,7 @@
       <button class="primary" id="btnStart">开始测量</button>
       <button id="btnCalib" disabled>静止校准</button>
       <button id="btnGps">开启定位</button>
+      <button id="btnCompass">开启指南针</button>
     </div>
 
     <div class="switch-row">
@@ -187,10 +188,11 @@
   <div class="card hint">
     使用方式：<b>手机水平握持、屏幕朝上、顶部指向前进方向</b>，保持稳定后点「静止校准」，再开始移动。<br>
     · X = 左右，Y = 前后，Z = 上下。<br>
-    · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
+    · 罗盘以正北为上，指针指向当前运行方向（运动时以卫星方向为准，静止时用指南针保持）。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
     · 点「开启定位」后，融合速度以卫星速度为基准、加速度计补短期变化；户外或乘车（手机放桌上）也能读出真实速度。<br>
-    <span style="color:#4dd0e1">版本 v7</span>
+    · 点「开启指南针」可用磁力计与陀螺仪辅助方向；车厢金属会影响磁场，所以移动中优先信卫星。<br>
+    <span style="color:#4dd0e1">版本 v8</span>
   </div>
 </div>
 
@@ -230,6 +232,12 @@ var lastGpsPos = null;
 var lastGpsT = 0;
 var gpsBase = null;  // 卫星速度基准（融合的绝对速度来源）
 var velMagRef = 0;   // 上次卫星更新时的加速度积分速度大小
+
+// 方向融合（指南针 + 陀螺仪 + 卫星）
+var orientationOn = false;
+var phoneHeading = null;   // 手机顶部朝向（相对北，度）
+var gpsHeading = null;     // 运动方向（相对北，度），来自卫星
+var headingOffset = null;  // 运动方向与手机朝向的夹角
 
 // 速度历史（画曲线用）
 var speedHistory = [];
@@ -284,17 +292,9 @@ function updateReadouts() {
   sigEl.textContent = "信号：" + sig.text + (gpsAccuracyVal != null ? "（约 " + Math.round(gpsAccuracyVal) + " 米）" : "");
   sigEl.style.color = sig.color;
 
-  var am = accSpeedMag();
-  var h = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
-  if (am < 0.001) {
-    $("azimuth").innerHTML = "—<small>°</small>";
-    $("pitch").innerHTML = "—<small>°</small>";
-  } else {
-    var az = (Math.atan2(vel.x, vel.y) * 180 / Math.PI + 360) % 360;
-    var pt = Math.atan2(vel.z, h) * 180 / Math.PI;
-    $("azimuth").innerHTML = fmt(az, 0) + "<small>°</small>";
-    $("pitch").innerHTML = fmt(pt, 0) + "<small>°</small>";
-  }
+  var mh = motionHeading();
+  $("azimuth").innerHTML = mh == null ? "—<small>°</small>" : Math.round(mh) + "<small>°</small>";
+  $("pitch").innerHTML = phoneHeading == null ? "—<small>°</small>" : Math.round(phoneHeading) + "<small>°</small>";
 
   $("ax").textContent = fmt(acc.x);
   $("ay").textContent = fmt(acc.y);
@@ -477,6 +477,79 @@ function calibrate() {
   window.addEventListener("devicemotion", onCalib, true);
 }
 
+// ---------- 方向融合（指南针 + 陀螺仪 + 卫星）----------
+
+var gotAbsolute = false;
+
+function bearingTo(lat1, lon1, lat2, lon2) {
+  var p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+  var dl = (lon2 - lon1) * Math.PI / 180;
+  var y = Math.sin(dl) * Math.cos(p2);
+  var x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function onOrientation(e) {
+  if (e.type === "deviceorientationabsolute") gotAbsolute = true;
+  else if (gotAbsolute) return; // 已有绝对朝向数据，忽略相对数据
+
+  var h = null;
+  if (typeof e.webkitCompassHeading === "number" && !isNaN(e.webkitCompassHeading)) {
+    h = e.webkitCompassHeading;
+  } else if (typeof e.alpha === "number" && !isNaN(e.alpha)) {
+    h = (360 - e.alpha) % 360;
+  }
+  if (h !== null) {
+    phoneHeading = h;
+    if (gpsHeading !== null) {
+      headingOffset = ((gpsHeading - phoneHeading + 540) % 360) - 180;
+    }
+  }
+}
+
+// 当前最可信的运行方向：卫星优先，其次用指南针加已知夹角推算
+function motionHeading() {
+  if (gpsHeading !== null) return gpsHeading;
+  if (phoneHeading !== null && headingOffset !== null) {
+    return (((phoneHeading + headingOffset) % 360) + 360) % 360;
+  }
+  if (phoneHeading !== null) return phoneHeading;
+  return null;
+}
+
+function toggleCompass() {
+  if (orientationOn) { stopCompass(); return; }
+  if (typeof DeviceOrientationEvent === "undefined") {
+    setStatus("此浏览器不支持指南针/陀螺仪", "err");
+    return;
+  }
+  if (typeof DeviceOrientationEvent.requestPermission === "function") {
+    DeviceOrientationEvent.requestPermission().then(function (state) {
+      if (state === "granted") startOrientation();
+      else setStatus("指南针权限被拒绝", "err");
+    }).catch(function (err) {
+      setStatus("指南针权限出错：" + err.message, "err");
+    });
+  } else {
+    startOrientation();
+  }
+}
+
+function startOrientation() {
+  window.addEventListener("deviceorientationabsolute", onOrientation, true);
+  window.addEventListener("deviceorientation", onOrientation, true);
+  orientationOn = true;
+  $("btnCompass").textContent = "关闭指南针";
+}
+
+function stopCompass() {
+  window.removeEventListener("deviceorientationabsolute", onOrientation, true);
+  window.removeEventListener("deviceorientation", onOrientation, true);
+  orientationOn = false;
+  phoneHeading = null;
+  $("btnCompass").textContent = "开启指南针";
+}
+
 // ---------- 卫星定位融合 ----------
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -525,16 +598,30 @@ function onGpsErr(err) {
 function onGps(pos) {
   var c = pos.coords;
   var t = pos.timestamp || performance.now();
+  var dtg = (t - lastGpsT) / 1000;
   var sp = null;
   if (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) {
     sp = c.speed;
   }
-  if (sp === null && lastGpsPos) {
-    var dtg = (t - lastGpsT) / 1000;
-    if (dtg > 0.3) {
-      sp = haversine(lastGpsPos.latitude, lastGpsPos.longitude, c.latitude, c.longitude) / dtg;
+  if (sp === null && lastGpsPos && dtg > 0.3) {
+    sp = haversine(lastGpsPos.latitude, lastGpsPos.longitude, c.latitude, c.longitude) / dtg;
+  }
+
+  // 运动方向：优先设备报告的方向，其次用前后两点位置差分的方位角
+  var hd = null;
+  if (typeof c.heading === "number" && !isNaN(c.heading) && sp !== null && sp > 0.5) {
+    hd = c.heading;
+  }
+  if (hd === null && lastGpsPos && sp !== null && sp > 0.5 && dtg > 0.5) {
+    hd = bearingTo(lastGpsPos.latitude, lastGpsPos.longitude, c.latitude, c.longitude);
+  }
+  if (hd !== null) {
+    gpsHeading = hd;
+    if (phoneHeading !== null) {
+      headingOffset = ((gpsHeading - phoneHeading + 540) % 360) - 180;
     }
   }
+
   lastGpsPos = { latitude: c.latitude, longitude: c.longitude };
   lastGpsT = t;
   gpsAccuracyVal = c.accuracy;
@@ -575,70 +662,77 @@ function drawCompass() {
   cctx.clearRect(0, 0, w, h);
 
   var cx = w * 0.42, cy = h / 2;
-  var R = Math.min(h / 2 - 12, w * 0.34);
+  var R = Math.min(h / 2 - 34, w * 0.32);
 
-  // 刻度环
-  cctx.strokeStyle = "rgba(139,152,169,0.25)";
+  // 外圈与刻度
+  cctx.strokeStyle = "rgba(139,152,169,0.3)";
   cctx.lineWidth = 1;
   cctx.beginPath();
   cctx.arc(cx, cy, R, 0, Math.PI * 2);
   cctx.stroke();
 
-  for (var a = 0; a < 360; a += 30) {
+  for (var a = 0; a < 360; a += 15) {
     var rad = a * Math.PI / 180;
-    var long = (a % 90 === 0);
-    var r1 = R - (long ? 12 : 7), r2 = R - 1;
+    var long = (a % 45 === 0);
+    var r1 = R - (long ? 10 : 5);
     cctx.beginPath();
     cctx.moveTo(cx + Math.sin(rad) * r1, cy - Math.cos(rad) * r1);
-    cctx.lineTo(cx + Math.sin(rad) * r2, cy - Math.cos(rad) * r2);
+    cctx.lineTo(cx + Math.sin(rad) * R, cy - Math.cos(rad) * R);
     cctx.stroke();
-    if (long) {
-      var label = (a === 0 ? "前" : a === 90 ? "右" : a === 180 ? "后" : "左");
-      cctx.fillStyle = "rgba(230,237,243,0.55)";
-      cctx.font = "11px sans-serif";
-      cctx.textAlign = "center";
-      cctx.textBaseline = "middle";
-      cctx.fillText(label, cx + Math.sin(rad) * (r1 - 17), cy - Math.cos(rad) * (r1 - 17));
-    }
   }
 
-  // 十字参考线
-  cctx.strokeStyle = "rgba(139,152,169,0.14)";
-  cctx.beginPath();
-  cctx.moveTo(cx - R, cy); cctx.lineTo(cx + R, cy);
-  cctx.moveTo(cx, cy - R); cctx.lineTo(cx, cy + R);
-  cctx.stroke();
+  var dirs = [[0, "北"], [90, "东"], [180, "南"], [270, "西"]];
+  cctx.font = "12px sans-serif";
+  cctx.textAlign = "center";
+  cctx.textBaseline = "middle";
+  for (var di = 0; di < dirs.length; di++) {
+    var rd = dirs[di][0] * Math.PI / 180;
+    cctx.fillStyle = (dirs[di][0] === 0) ? "#f28b82" : "rgba(230,237,243,0.7)";
+    cctx.fillText(dirs[di][1], cx + Math.sin(rd) * (R - 20), cy - Math.cos(rd) * (R - 20));
+  }
 
-  // 水平速度箭头
-  var h = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
-  var scale = h > 0.02 ? R / Math.max(h, 0.02) : 0;
-  var dx = vel.x * scale, dy = -vel.y * scale;
-  var len = Math.sqrt(dx * dx + dy * dy);
-  if (len > R) { dx = dx / len * R; dy = dy / len * R; }
-
-  cctx.strokeStyle = "#4dd0e1";
-  cctx.fillStyle = "#4dd0e1";
-  cctx.lineWidth = 3;
+  // 运行方向指针（以正北为基准）
+  var mh = motionHeading();
   cctx.lineCap = "round";
-
-  if (len > 2) {
+  cctx.textAlign = "center";
+  cctx.textBaseline = "middle";
+  if (mh !== null) {
+    var rm = mh * Math.PI / 180;
+    var len = R - 24;
+    var ex = cx + Math.sin(rm) * len, ey = cy - Math.cos(rm) * len;
+    cctx.strokeStyle = "#4dd0e1";
+    cctx.fillStyle = "#4dd0e1";
+    cctx.lineWidth = 4;
     cctx.beginPath();
     cctx.moveTo(cx, cy);
-    cctx.lineTo(cx + dx, cy + dy);
+    cctx.lineTo(ex, ey);
     cctx.stroke();
-    var ang = Math.atan2(dy, dx);
-    var ah = 9;
+    var ang = Math.atan2(ey - cy, ex - cx);
+    var ah = 11;
     cctx.beginPath();
-    cctx.moveTo(cx + dx, cy + dy);
-    cctx.lineTo(cx + dx - ah * Math.cos(ang - 0.45), cy + dy - ah * Math.sin(ang - 0.45));
-    cctx.lineTo(cx + dx - ah * Math.cos(ang + 0.45), cy + dy - ah * Math.sin(ang + 0.45));
+    cctx.moveTo(ex, ey);
+    cctx.lineTo(ex - ah * Math.cos(ang - 0.4), ey - ah * Math.sin(ang - 0.4));
+    cctx.lineTo(ex - ah * Math.cos(ang + 0.4), ey - ah * Math.sin(ang + 0.4));
     cctx.closePath();
     cctx.fill();
+    cctx.fillStyle = "rgba(230,237,243,0.9)";
+    cctx.font = "13px sans-serif";
+    cctx.fillText(Math.round(mh) + "° 运行方向", cx, cy + R + 20);
   } else {
+    cctx.fillStyle = "rgba(139,152,169,0.6)";
     cctx.beginPath();
     cctx.arc(cx, cy, 3, 0, Math.PI * 2);
     cctx.fill();
+    cctx.fillStyle = "rgba(139,152,169,0.8)";
+    cctx.font = "12px sans-serif";
+    cctx.fillText("开启定位或指南针后显示方向", cx, cy + R + 20);
   }
+
+  // 中心点
+  cctx.fillStyle = "#e6edf3";
+  cctx.beginPath();
+  cctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  cctx.fill();
 
   // 右侧：竖直速度条
   var barX = w - 46, barW = 18, barH = h - 30, barTop = 15;
@@ -709,6 +803,7 @@ function init() {
   $("btnStart").addEventListener("click", toggle);
   $("btnCalib").addEventListener("click", calibrate);
   $("btnGps").addEventListener("click", toggleGps);
+  $("btnCompass").addEventListener("click", toggleCompass);
 
   compass = $("compass");
   chart = $("chart");
