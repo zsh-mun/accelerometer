@@ -60,6 +60,7 @@
   .dir-cell .k { font-size: 11px; color: var(--muted); }
   .dir-cell .v { font-size: 20px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
   .dir-cell .v small { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .dir-cell .sig { font-size: 11px; margin-top: 4px; color: var(--muted); }
 
   canvas.compass { width: 100%; height: 240px; display: block; }
   canvas.chart { width: 100%; height: 84px; display: block; }
@@ -121,7 +122,19 @@
 
     <div style="margin-top:10px">
       <span class="speed-big" id="speedBig">0.00<span class="unit">m/s</span></span>
-      <div class="speed-label">速度大小（三轴合矢量）</div>
+      <div class="speed-label">融合速度 · <span id="speedKmh">0.0</span> km/h</div>
+    </div>
+
+    <div class="dir-grid">
+      <div class="dir-cell">
+        <div class="k">卫星速度</div>
+        <div class="v" id="gpsSpeedBig">—<small>m/s</small></div>
+        <div class="sig" id="gpsSignal">信号：—</div>
+      </div>
+      <div class="dir-cell">
+        <div class="k">加速度速度</div>
+        <div class="v" id="accSpeedBig">0.00<small>m/s</small></div>
+      </div>
     </div>
 
     <div class="dir-grid">
@@ -169,12 +182,6 @@
       <div class="cell"><div class="axis">Z 上下</div><div class="val" id="vz">0.00</div></div>
     </div>
 
-    <div class="section-t">卫星定位融合</div>
-    <div class="grid3">
-      <div class="cell"><div class="axis">GPS 速度 m/s</div><div class="val" id="gpsSpeed">—</div></div>
-      <div class="cell"><div class="axis">定位精度 米</div><div class="val" id="gpsAcc">—</div></div>
-      <div class="cell"><div class="axis">融合速度 m/s</div><div class="val" id="fusedSpeed">—</div></div>
-    </div>
   </div>
 
   <div class="card hint">
@@ -182,8 +189,8 @@
     · X = 左右，Y = 前后，Z = 上下。<br>
     · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
-    · 点「开启定位」后，会用卫星速度定期修正漂移，融合出更可靠的速度（户外效果最好）。<br>
-    <span style="color:#4dd0e1">版本 v6</span>
+    · 点「开启定位」后，融合速度以卫星速度为基准、加速度计补短期变化；户外或乘车（手机放桌上）也能读出真实速度。<br>
+    <span style="color:#4dd0e1">版本 v7</span>
   </div>
 </div>
 
@@ -221,6 +228,8 @@ var gpsSpeedVal = null;
 var gpsAccuracyVal = null;
 var lastGpsPos = null;
 var lastGpsT = 0;
+var gpsBase = null;  // 卫星速度基准（融合的绝对速度来源）
+var velMagRef = 0;   // 上次卫星更新时的加速度积分速度大小
 
 // 速度历史（画曲线用）
 var speedHistory = [];
@@ -243,12 +252,41 @@ function speed() {
   return Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
 }
 
-function updateReadouts() {
-  var s = speed();
-  $("speedBig").innerHTML = fmt(s) + '<span class="unit">m/s</span>';
+function accSpeedMag() {
+  return Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+}
 
+// 融合：以卫星速度为绝对基准，加速度积分只补两次卫星更新之间的变化
+function fusionSpeed() {
+  var a = accSpeedMag();
+  if (gpsBase == null) return a;
+  var f = gpsBase + (a - velMagRef);
+  return f < 0 ? 0 : f;
+}
+
+function gpsSignalInfo(accMeters) {
+  if (accMeters == null) return { text: "—", color: "#8b98a9" };
+  if (accMeters <= 10) return { text: "强", color: "#6ee7a0" };
+  if (accMeters <= 30) return { text: "中", color: "#f5c66b" };
+  if (accMeters <= 100) return { text: "弱", color: "#f28b82" };
+  return { text: "很差", color: "#f28b82" };
+}
+
+function updateReadouts() {
+  var s = fusionSpeed();
+  $("speedBig").innerHTML = fmt(s) + '<span class="unit">m/s</span>';
+  $("speedKmh").textContent = (s * 3.6).toFixed(1);
+
+  $("accSpeedBig").innerHTML = fmt(accSpeedMag()) + "<small>m/s</small>";
+  $("gpsSpeedBig").innerHTML = gpsSpeedVal == null ? "—<small>m/s</small>" : fmt(gpsSpeedVal) + "<small>m/s</small>";
+  var sig = gpsSignalInfo(gpsAccuracyVal);
+  var sigEl = $("gpsSignal");
+  sigEl.textContent = "信号：" + sig.text + (gpsAccuracyVal != null ? "（约 " + Math.round(gpsAccuracyVal) + " 米）" : "");
+  sigEl.style.color = sig.color;
+
+  var am = accSpeedMag();
   var h = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
-  if (s < 0.001) {
+  if (am < 0.001) {
     $("azimuth").innerHTML = "—<small>°</small>";
     $("pitch").innerHTML = "—<small>°</small>";
   } else {
@@ -264,10 +302,6 @@ function updateReadouts() {
   $("vx").textContent = fmt(vel.x);
   $("vy").textContent = fmt(vel.y);
   $("vz").textContent = fmt(vel.z);
-
-  $("gpsSpeed").textContent = gpsSpeedVal == null ? "—" : fmt(gpsSpeedVal);
-  $("gpsAcc").textContent = gpsAccuracyVal == null ? "—" : fmt(gpsAccuracyVal, 0);
-  $("fusedSpeed").textContent = fmt(s);
 
   $("stillBadge").classList.toggle("show", isStill && running);
 }
@@ -396,12 +430,13 @@ function onMotion(e) {
 
   if ($("autoZero").checked && stillNow) {
     vel.x = 0; vel.y = 0; vel.z = 0;
+    velMagRef = 0; // 与加速度速度同步归零，避免融合速度被拉低
     g.x = aig.x; g.y = aig.y; g.z = aig.z; // 静止时读数即纯重力，直接锁定
   }
   isStill = stillNow;
 
   // 历史
-  speedHistory.push({ t: now, s: speed() });
+  speedHistory.push({ t: now, s: fusionSpeed() });
   while (speedHistory.length && now - speedHistory[0].t > HISTORY_MS) speedHistory.shift();
 
   updateReadouts();
@@ -430,6 +465,7 @@ function calibrate() {
         g.z = sum.z / samples.length;
       }
       vel.x = 0; vel.y = 0; vel.z = 0;
+      velMagRef = 0;
       calibrated = true;
       setStatus("校准完成 · 测量中", "on");
       if (running) window.addEventListener("devicemotion", onMotion, true);
@@ -476,10 +512,10 @@ function stopGps() {
   gpsSpeedVal = null;
   gpsAccuracyVal = null;
   lastGpsPos = null;
+  gpsBase = null;
+  velMagRef = 0;
   $("btnGps").textContent = "开启定位";
-  $("gpsSpeed").textContent = "—";
-  $("gpsAcc").textContent = "—";
-  $("fusedSpeed").textContent = "—";
+  updateReadouts();
 }
 
 function onGpsErr(err) {
@@ -504,25 +540,13 @@ function onGps(pos) {
   gpsAccuracyVal = c.accuracy;
   if (sp !== null) {
     gpsSpeedVal = sp;
-    fuseVelocity(sp, c.accuracy);
+    // 只有定位精度可用时才采信为绝对基准；太差就忽略，退化为纯加速度积分
+    if (c.accuracy == null || c.accuracy <= 100) {
+      gpsBase = sp;               // 卫星速度作为绝对基准
+      velMagRef = accSpeedMag();  // 记录此刻的加速度积分速度，之后只补增量
+    }
   }
   updateReadouts();
-}
-
-function fuseVelocity(gpsSpeed, accuracy) {
-  var speedAcc = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
-  // 定位越准，权重越高；只修正速度大小，方向仍由加速度计给出
-  var w = 0.3;
-  if (accuracy != null) {
-    if (accuracy <= 8) w = 0.55;
-    else if (accuracy >= 30) w = 0.15;
-  }
-  var target = speedAcc + w * (gpsSpeed - speedAcc);
-  if (speedAcc > 0.05) {
-    var s = target / speedAcc;
-    if (s < 0) s = 0;
-    vel.x *= s; vel.y *= s; vel.z *= s;
-  }
 }
 
 // ---------- 绘图 ----------
