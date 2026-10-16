@@ -144,6 +144,7 @@
     <div class="btns">
       <button class="primary" id="btnStart">开始测量</button>
       <button id="btnCalib" disabled>静止校准</button>
+      <button id="btnGps">开启定位</button>
     </div>
 
     <div class="switch-row">
@@ -167,6 +168,13 @@
       <div class="cell"><div class="axis">Y 前后</div><div class="val" id="vy">0.00</div></div>
       <div class="cell"><div class="axis">Z 上下</div><div class="val" id="vz">0.00</div></div>
     </div>
+
+    <div class="section-t">卫星定位融合</div>
+    <div class="grid3">
+      <div class="cell"><div class="axis">GPS 速度 m/s</div><div class="val" id="gpsSpeed">—</div></div>
+      <div class="cell"><div class="axis">定位精度 米</div><div class="val" id="gpsAcc">—</div></div>
+      <div class="cell"><div class="axis">融合速度 m/s</div><div class="val" id="fusedSpeed">—</div></div>
+    </div>
   </div>
 
   <div class="card hint">
@@ -174,7 +182,8 @@
     · X = 左右，Y = 前后，Z = 上下。<br>
     · 方向罗盘是俯视图：箭头指向就是水平运动方向，长度代表水平速度。<br>
     · 积分会随时间漂移，请保持每次测量时间较短，并开启「自动归零」。<br>
-    <span style="color:#4dd0e1">版本 v5</span>
+    · 点「开启定位」后，会用卫星速度定期修正漂移，融合出更可靠的速度（户外效果最好）。<br>
+    <span style="color:#4dd0e1">版本 v6</span>
   </div>
 </div>
 
@@ -204,6 +213,14 @@ var STILL_THRESHOLD = 0.18; // m/s²
 var isStill = false;
 var noDataTimer = null;
 var gotData = false;
+
+// 卫星定位融合
+var gpsOn = false;
+var gpsWatchId = null;
+var gpsSpeedVal = null;
+var gpsAccuracyVal = null;
+var lastGpsPos = null;
+var lastGpsT = 0;
 
 // 速度历史（画曲线用）
 var speedHistory = [];
@@ -247,6 +264,10 @@ function updateReadouts() {
   $("vx").textContent = fmt(vel.x);
   $("vy").textContent = fmt(vel.y);
   $("vz").textContent = fmt(vel.z);
+
+  $("gpsSpeed").textContent = gpsSpeedVal == null ? "—" : fmt(gpsSpeedVal);
+  $("gpsAcc").textContent = gpsAccuracyVal == null ? "—" : fmt(gpsAccuracyVal, 0);
+  $("fusedSpeed").textContent = fmt(s);
 
   $("stillBadge").classList.toggle("show", isStill && running);
 }
@@ -420,6 +441,90 @@ function calibrate() {
   window.addEventListener("devicemotion", onCalib, true);
 }
 
+// ---------- 卫星定位融合 ----------
+
+function haversine(lat1, lon1, lat2, lon2) {
+  var R = 6371000;
+  var dLat = (lat2 - lat1) * Math.PI / 180;
+  var dLon = (lon2 - lon1) * Math.PI / 180;
+  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function toggleGps() {
+  if (gpsOn) { stopGps(); return; }
+  if (!navigator.geolocation) {
+    setStatus("此浏览器不支持定位", "err");
+    return;
+  }
+  $("btnGps").textContent = "定位中…";
+  gpsWatchId = navigator.geolocation.watchPosition(onGps, onGpsErr, {
+    enableHighAccuracy: true, maximumAge: 1000, timeout: 15000
+  });
+  gpsOn = true;
+  $("btnGps").textContent = "关闭定位";
+}
+
+function stopGps() {
+  if (gpsWatchId !== null) {
+    try { navigator.geolocation.clearWatch(gpsWatchId); } catch (e) {}
+    gpsWatchId = null;
+  }
+  gpsOn = false;
+  gpsSpeedVal = null;
+  gpsAccuracyVal = null;
+  lastGpsPos = null;
+  $("btnGps").textContent = "开启定位";
+  $("gpsSpeed").textContent = "—";
+  $("gpsAcc").textContent = "—";
+  $("fusedSpeed").textContent = "—";
+}
+
+function onGpsErr(err) {
+  setStatus("定位失败：" + (err && err.message ? err.message : "未知原因"), "err");
+}
+
+function onGps(pos) {
+  var c = pos.coords;
+  var t = pos.timestamp || performance.now();
+  var sp = null;
+  if (c.speed !== null && c.speed !== undefined && !isNaN(c.speed) && c.speed >= 0) {
+    sp = c.speed;
+  }
+  if (sp === null && lastGpsPos) {
+    var dtg = (t - lastGpsT) / 1000;
+    if (dtg > 0.3) {
+      sp = haversine(lastGpsPos.latitude, lastGpsPos.longitude, c.latitude, c.longitude) / dtg;
+    }
+  }
+  lastGpsPos = { latitude: c.latitude, longitude: c.longitude };
+  lastGpsT = t;
+  gpsAccuracyVal = c.accuracy;
+  if (sp !== null) {
+    gpsSpeedVal = sp;
+    fuseVelocity(sp, c.accuracy);
+  }
+  updateReadouts();
+}
+
+function fuseVelocity(gpsSpeed, accuracy) {
+  var speedAcc = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+  // 定位越准，权重越高；只修正速度大小，方向仍由加速度计给出
+  var w = 0.3;
+  if (accuracy != null) {
+    if (accuracy <= 8) w = 0.55;
+    else if (accuracy >= 30) w = 0.15;
+  }
+  var target = speedAcc + w * (gpsSpeed - speedAcc);
+  if (speedAcc > 0.05) {
+    var s = target / speedAcc;
+    if (s < 0) s = 0;
+    vel.x *= s; vel.y *= s; vel.z *= s;
+  }
+}
+
 // ---------- 绘图 ----------
 
 var compass = null;
@@ -579,6 +684,7 @@ function render() {
 function init() {
   $("btnStart").addEventListener("click", toggle);
   $("btnCalib").addEventListener("click", calibrate);
+  $("btnGps").addEventListener("click", toggleGps);
 
   compass = $("compass");
   chart = $("chart");
